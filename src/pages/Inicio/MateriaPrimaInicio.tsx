@@ -17,6 +17,13 @@ function formatarStatusSeparacao(status: string): string {
   return status
 }
 
+type PeriodoSeparacao = {
+  inicio: string
+  fim: string
+  tipo: string
+  label: string
+}
+
 type LinhaSeparacao = {
   prioridadeLib: string
   prioridadeLibClass: string
@@ -31,6 +38,8 @@ type LinhaSeparacao = {
   horaInicioSeparacao: string
   horaFimSeparacao: string
   tempoSeparacao: string
+  periodosSeparacao: PeriodoSeparacao[]
+  temPausasSeparacao: boolean
   statusSeparacao: string
   separacaoClass: string
   statusFinal: string
@@ -113,6 +122,37 @@ WHERE ('${op}' = '' OR PL.OP = '${op}')
 ORDER BY PL.NIV_PRIORIDADE ASC, PL.SEQ ASC`
 }
 
+function montarSqlExecucoesSeparacao(
+  dataProgramacao: string,
+  dataAnterior: string,
+  op: string,
+  linha: string,
+  turno: string
+) {
+  return `SELECT
+    OP.IDIPROC AS COD_OP
+    , EFX.DESCRICAO AS NOME_ATIVIDADE
+    , EXEC_DETALHE.DHINICIO
+    , EXEC_DETALHE.DHFINAL
+    , EXEC_DETALHE.TIPO
+FROM TPRIPROC OP
+JOIN TPRIATV ATV ON ATV.IDIPROC = OP.IDIPROC
+JOIN TPREFX EFX ON EFX.IDEFX = ATV.IDEFX
+JOIN TPREIATV EXEC_DETALHE ON EXEC_DETALHE.IDIATV = ATV.IDIATV
+WHERE OP.IDIPROC IN (
+  SELECT PL.OP
+  FROM AD_PLANEJAMENTOPRODUCAO PL
+  WHERE ('${op}' = '' OR PL.OP = '${op}')
+    AND ('${linha}' = '' OR PL.EQUIP = '${linha}')
+    AND ('${turno}' = '' OR PL.TURNO = '${turno}')
+    AND (
+      CONVERT(DATE, PL.DATAPROGRAMACAO) = CONVERT(DATE, '${formatSqlDate(dataProgramacao)}')
+      OR CONVERT(DATE, PL.DATAPROGRAMACAO) = CONVERT(DATE, '${formatSqlDate(dataAnterior)}')
+    )
+)
+ORDER BY OP.IDIPROC, EXEC_DETALHE.DHINICIO ASC`
+}
+
 function formatDateInput(date: Date) {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
@@ -161,21 +201,18 @@ function formatSqlDate(date: string) {
 
 function formatarDataHoraExibicao(valor: any): string {
   if (!valor) return '--:--'
-  
-  const str = String(valor).trim()
-  
-  if (/^\d{8}\s\d{2}:\d{2}:\d{2}$/.test(str)) {
-    const hora = str.substring(9, 11)
-    const minuto = str.substring(12, 14)
-    return `${hora}:${minuto}`
-  }
-  
-  if (str.includes(':')) {
-    const match = str.match(/(\d{2}):(\d{2})/)
-    return match ? `${match[1]}:${match[2]}` : str
-  }
-  
-  return str
+  const data = parseDataHora(valor)
+  if (!data) return '--:--'
+  return data.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+}
+
+function normalizarOpKey(op: any): string {
+  return String(op ?? '').trim()
+}
+
+function isPeriodoTrabalho(tipo: string): boolean {
+  const t = tipo.trim().toUpperCase()
+  return t === 'N' || t === '' || t === 'NORMAL' || t === 'TRABALHO'
 }
 
 function valor(row: any, nomes: string[], index: number) {
@@ -240,51 +277,156 @@ function getRowClassByNivPrioridade(nivPrioridade: any, processoCompleto: boolea
   }
 }
 
+function parseDataHora(valor: any): Date | null {
+  if (!valor) return null
+  if (valor instanceof Date) return valor
+
+  const str = String(valor).trim()
+
+  const br = str.match(/^(\d{2})\/(\d{2})\/(\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/)
+  if (br) {
+    const data = new Date(
+      Number(br[3]),
+      Number(br[2]) - 1,
+      Number(br[1]),
+      Number(br[4]),
+      Number(br[5]),
+      Number(br[6] || 0)
+    )
+    if (!isNaN(data.getTime())) return data
+  }
+
+  const iso = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/)
+  if (iso) {
+    const data = new Date(
+      Number(iso[1]),
+      Number(iso[2]) - 1,
+      Number(iso[3]),
+      Number(iso[4]),
+      Number(iso[5]),
+      Number(iso[6] || 0)
+    )
+    if (!isNaN(data.getTime())) return data
+  }
+
+  if (/^\d{8}\s\d{2}:\d{2}:\d{2}$/.test(str)) {
+    const dia = Number(str.substring(0, 2))
+    const mes = Number(str.substring(2, 4)) - 1
+    const ano = Number(str.substring(4, 8))
+    const hora = Number(str.substring(9, 11))
+    const minuto = Number(str.substring(12, 14))
+    const segundo = Number(str.substring(15, 17))
+    const data = new Date(ano, mes, dia, hora, minuto, segundo)
+    if (!isNaN(data.getTime())) return data
+  }
+
+  const data = new Date(valor)
+  if (!isNaN(data.getTime())) return data
+  return null
+}
+
+function segundosParaHms(totalSegundos: number): string {
+  const h = Math.floor(totalSegundos / 3600)
+  const m = Math.floor((totalSegundos % 3600) / 60)
+  const s = totalSegundos % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatarDataHoraTooltip(valor: any): string {
+  const data = parseDataHora(valor)
+  if (!data) return '--'
+  return data.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function labelTipoExecucao(tipo: string): string {
+  if (tipo === 'N') return 'Trabalho'
+  if (tipo === 'P') return 'Pausa'
+  return tipo
+}
+
+function agruparExecucoesPorOp(rows: any[]): Map<string, any[]> {
+  const map = new Map<string, any[]>()
+  for (const row of rows) {
+    const codOp = normalizarOpKey(valor(row, ['COD_OP'], 0))
+    if (!codOp) continue
+    const lista = map.get(codOp) ?? []
+    lista.push(row)
+    map.set(codOp, lista)
+  }
+  return map
+}
+
+function calcularResumoSeparacaoExec(rows: any[]) {
+  if (!rows.length) return null
+
+  const periodos = rows
+    .map((row) => ({
+      inicio: valor(row, ['DHINICIO'], 2),
+      fim: valor(row, ['DHFINAL'], 3),
+      tipo: texto(valor(row, ['TIPO'], 4), 'N').trim().toUpperCase(),
+    }))
+    .filter((p) => p.inicio != null && p.inicio !== '' && p.fim != null && p.fim !== '')
+    .sort(
+      (a, b) =>
+        (parseDataHora(a.inicio)?.getTime() ?? 0) - (parseDataHora(b.inicio)?.getTime() ?? 0)
+    )
+
+  if (!periodos.length) return null
+
+  let totalSegundosTrabalho = 0
+  const periodosFmt: PeriodoSeparacao[] = []
+
+  for (const periodo of periodos) {
+    const inicio = parseDataHora(periodo.inicio)
+    const fim = parseDataHora(periodo.fim)
+    if (!inicio || !fim) continue
+
+    const segundos = Math.max(0, Math.floor((fim.getTime() - inicio.getTime()) / 1000))
+    if (isPeriodoTrabalho(periodo.tipo)) totalSegundosTrabalho += segundos
+
+    periodosFmt.push({
+      inicio: formatarDataHoraTooltip(periodo.inicio),
+      fim: formatarDataHoraTooltip(periodo.fim),
+      tipo: periodo.tipo,
+      label: labelTipoExecucao(periodo.tipo),
+    })
+  }
+
+  if (!periodosFmt.length) return null
+
+  const periodosTrabalho = periodos.filter((p) => isPeriodoTrabalho(p.tipo))
+  const referencia = periodosTrabalho.length > 0 ? periodosTrabalho : periodos
+  const primeiro = referencia[0]
+  const ultimo = referencia[referencia.length - 1]
+
+  return {
+    horaInicio: formatarDataHoraExibicao(primeiro.inicio),
+    horaFim: formatarDataHoraExibicao(ultimo.fim),
+    tempoTrabalhado: segundosParaHms(totalSegundosTrabalho),
+    periodos: periodosFmt,
+    temMultiplosPeriodos: periodos.length > 1,
+  }
+}
+
 function calcularDiferencaTempo(inicio: any, fim: any): string {
   if (!inicio || !fim) return '00:00:00'
-  
+
   try {
-    // Função para parsear formato DDMMAAAA HH:MM:SS
-    const parseDataHora = (valor: any): Date | null => {
-      if (!valor) return null
-      
-      // Se já for Date, retorna
-      if (valor instanceof Date) return valor
-      
-      const str = String(valor).trim()
-      
-      // Tenta formato DDMMAAAA HH:MM:SS
-      if (/^\d{8}\s\d{2}:\d{2}:\d{2}$/.test(str)) {
-        const dia = Number(str.substring(0, 2))
-        const mes = Number(str.substring(2, 4)) - 1 // JS months são 0-11
-        const ano = Number(str.substring(4, 8))
-        const hora = Number(str.substring(9, 11))
-        const minuto = Number(str.substring(12, 14))
-        const segundo = Number(str.substring(15, 17))
-        
-        const data = new Date(ano, mes, dia, hora, minuto, segundo)
-        if (!isNaN(data.getTime())) return data
-      }
-      
-      // Tenta formato padrão ISO
-      const data = new Date(valor)
-      if (!isNaN(data.getTime())) return data
-      
-      return null
-    }
-    
     const dataInicio = parseDataHora(inicio)
     const dataFim = parseDataHora(fim)
-    
     if (!dataInicio || !dataFim) return '00:00:00'
-    
-    const diferencaMs = Math.abs(dataFim.getTime() - dataInicio.getTime())
-    const totalSegundos = Math.floor(diferencaMs / 1000)
-    const h = Math.floor(totalSegundos / 3600)
-    const m = Math.floor((totalSegundos % 3600) / 60)
-    const s = totalSegundos % 60
-    
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+
+    const totalSegundos = Math.max(
+      0,
+      Math.floor(Math.abs(dataFim.getTime() - dataInicio.getTime()) / 1000)
+    )
+    return segundosParaHms(totalSegundos)
   } catch {
     return '00:00:00'
   }
@@ -307,7 +449,11 @@ function somarTempos(...tempos: string[]): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
-function mapLinhaSeparacao(row: any, index: number): LinhaSeparacao {
+function mapLinhaSeparacao(
+  row: any,
+  index: number,
+  execucoesPorOp?: Map<string, any[]>
+): LinhaSeparacao {
   const prioridadeLib = texto(valor(row, ['PRIORIDADE'], 10), 'NORMAL')
   const prioridadeLinha = texto(valor(row, ['LINHA_PRODUCAO'], 13), 'N')
   const statusSeparacaoRaw = texto(valor(row, ['STATUSSEPARACAO', 'StatusSeparacao'], 4), 'AGUARDANDO')
@@ -315,6 +461,7 @@ function mapLinhaSeparacao(row: any, index: number): LinhaSeparacao {
   const statusPesagem = texto(valor(row, ['QTDPES'], 5), '') ? 'FINALIZADO' : 'AGUARDANDO'
   const statusConferencia = texto(valor(row, ['STATUSCONFERENCIA', 'StatusConferencia'], 8), 'AGUARDANDO')
   const nivPrioridade = Number(valor(row, ['NIV_PRIORIDADE'], 14)) || 5
+  const op = normalizarOpKey(valor(row, ['OP'], 0))
 
   const rawInicioSeparacao = valor(row, ['DTINISEPARACAO', 'DtIniSeparacao'], 2)
   const rawFimSeparacao = valor(row, ['DTFIMSEPARACAO', 'DtFimSeparacao'], 3)
@@ -323,14 +470,25 @@ function mapLinhaSeparacao(row: any, index: number): LinhaSeparacao {
   const rawInicioConferencia = valor(row, ['DATAPESAGEM', 'DataPesagem'], 6)
   const rawFimConferencia = texto(valor(row, ['PESO_CONFERIDO'], 7), '') ? valor(row, ['DATAPESAGEM', 'DataPesagem'], 6) : null
 
-  const horaInicioSeparacao = formatarDataHoraExibicao(rawInicioSeparacao)
-  const horaFimSeparacao = formatarDataHoraExibicao(rawFimSeparacao)
+  const resumoExec = calcularResumoSeparacaoExec(execucoesPorOp?.get(op) ?? [])
+  const usaExecucaoDetalhada = Boolean(resumoExec)
+
+  const horaInicioSeparacao = usaExecucaoDetalhada
+    ? resumoExec!.horaInicio
+    : formatarDataHoraExibicao(rawInicioSeparacao)
+  const horaFimSeparacao = usaExecucaoDetalhada
+    ? resumoExec!.horaFim
+    : formatarDataHoraExibicao(rawFimSeparacao)
+  const periodosSeparacao = resumoExec?.periodos ?? []
+  const temPausasSeparacao = resumoExec?.temMultiplosPeriodos ?? false
   const horaInicioPesagem = formatarDataHoraExibicao(rawInicioPesagem)
   const horaFimPesagem = formatarDataHoraExibicao(rawFimPesagem)
   const horaInicioConferencia = formatarDataHoraExibicao(rawInicioConferencia)
   const horaFimConferencia = rawFimConferencia ? formatarDataHoraExibicao(rawFimConferencia) : '--:--'
 
-  const tempoSeparacao = calcularDiferencaTempo(rawInicioSeparacao, rawFimSeparacao)
+  const tempoSeparacao = usaExecucaoDetalhada
+    ? resumoExec!.tempoTrabalhado
+    : calcularDiferencaTempo(rawInicioSeparacao, rawFimSeparacao)
   const tempoPesagem = calcularDiferencaTempo(rawInicioPesagem, rawFimPesagem)
   const tempoConferencia = calcularDiferencaTempo(rawInicioConferencia, rawFimConferencia)
   const tempoTotal = somarTempos(tempoSeparacao, tempoPesagem, tempoConferencia)
@@ -353,12 +511,14 @@ function mapLinhaSeparacao(row: any, index: number): LinhaSeparacao {
     prioridadeLinhaClass: badgePrioridadeLinha(prioridadeLinha),
     seq: String(index + 1),
     linha: texto(valor(row, ['LINHA'], 11)),
-    op: texto(valor(row, ['OP'], 0)),
+    op,
     produto: texto(valor(row, ['PRODUTO', 'Produto'], 1)),
     dataProgramacao: texto(valor(row, ['DATAPROGRAMACAO'], 15)),
     horaInicioSeparacao,
     horaFimSeparacao,
     tempoSeparacao,
+    periodosSeparacao,
+    temPausasSeparacao,
     statusSeparacao,
     separacaoClass: badgeStatus(statusSeparacao),
     statusFinal,
@@ -377,6 +537,42 @@ function mapLinhaSeparacao(row: any, index: number): LinhaSeparacao {
     rowClass: getRowClassByNivPrioridade(nivPrioridade, processoCompleto),
     processoCompleto,
   }
+}
+
+function CardPeriodosSeparacao({ periodos }: { periodos: PeriodoSeparacao[] }) {
+  return (
+    <div className="mp-periodos-card">
+      <strong>Períodos da separação</strong>
+      <ul>
+        {periodos.map((periodo, index) => (
+          <li key={`${periodo.tipo}-${index}`} className={`mp-periodo-item mp-periodo-${periodo.tipo.toLowerCase()}`}>
+            <span className="mp-periodo-label">{periodo.label}</span>
+            <span className="mp-periodo-intervalo">
+              {periodo.inicio} → {periodo.fim}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function CelulaTempoSeparacao({ linha }: { linha: LinhaSeparacao }) {
+  if (!linha.temPausasSeparacao) {
+    return <td>{linha.tempoSeparacao}</td>
+  }
+
+  return (
+    <td onClick={(e) => e.stopPropagation()}>
+      <div className="mp-tempo-separacao-wrap">
+        <span>{linha.tempoSeparacao}</span>
+        <span className="mp-tempo-pausas-trigger" aria-label="Ver pausas e períodos da separação">
+          <FaInfoCircle className="mp-tempo-pausas-icon" />
+          <CardPeriodosSeparacao periodos={linha.periodosSeparacao} />
+        </span>
+      </div>
+    </td>
+  )
 }
 
 export default function MateriaPrimaInicio() {
@@ -459,21 +655,30 @@ export default function MateriaPrimaInicio() {
 
   const carregarSeparacao = useCallback(async () => {
     try {
-      const sql = montarSqlSeparacao(dataProgramacao, opSelecionada, linhaSelecionada, turnoSelecionado)
-      const response = await api.post(
-        `/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sql)}`
-      )
-      const data = response?.data?.responseBody?.rows || []
-      setLinhas(data.map((row: any, index: number) => mapLinhaSeparacao(row, index)))
-
       const dataAnterior = getDataAnterior(dataProgramacao)
+      const sql = montarSqlSeparacao(dataProgramacao, opSelecionada, linhaSelecionada, turnoSelecionado)
       const sqlAnterior = montarSqlSeparacao(dataAnterior, opSelecionada, linhaSelecionada, turnoSelecionado)
-      const responseAnterior = await api.post(
-        `/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sqlAnterior)}`
+      const sqlExec = montarSqlExecucoesSeparacao(
+        dataProgramacao,
+        dataAnterior,
+        opSelecionada,
+        linhaSelecionada,
+        turnoSelecionado
       )
+
+      const [response, responseAnterior, responseExec] = await Promise.all([
+        api.post(`/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sql)}`),
+        api.post(`/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sqlAnterior)}`),
+        api.post(`/api/Sankhya/DadosDashSankhya?sql=${encodeURIComponent(sqlExec)}`),
+      ])
+
+      const execucoesPorOp = agruparExecucoesPorOp(responseExec?.data?.responseBody?.rows || [])
+      const data = response?.data?.responseBody?.rows || []
       const dataAnteriorRows = responseAnterior?.data?.responseBody?.rows || []
+
+      setLinhas(data.map((row: any, index: number) => mapLinhaSeparacao(row, index, execucoesPorOp)))
       const itensNaoFinalizados = dataAnteriorRows
-        .map((row: any, index: number) => mapLinhaSeparacao(row, index))
+        .map((row: any, index: number) => mapLinhaSeparacao(row, index, execucoesPorOp))
         .filter((item: LinhaSeparacao) => !item.processoCompleto)
       setLinhasDiaAnterior(itensNaoFinalizados)
     } catch {
@@ -554,7 +759,7 @@ export default function MateriaPrimaInicio() {
         <td className="produto-cell">{r.produto}</td>
         <td>{r.horaInicioSeparacao}</td>
         <td>{r.horaFimSeparacao}</td>
-        <td>{r.tempoSeparacao}</td>
+        <CelulaTempoSeparacao linha={r} />
         <td>
           <span className={`badge-pill ${r.statusFinalClass}`}>{r.statusFinal}</span>
         </td>
@@ -889,6 +1094,16 @@ export default function MateriaPrimaInicio() {
                     </span>
                   </div>
                 </div>
+                {linhaSelecionadaModal.temPausasSeparacao && (
+                  <div className="mp-modal-periodos">
+                    <strong>Períodos (trabalho e pausas)</strong>
+                    {linhaSelecionadaModal.periodosSeparacao.map((periodo, index) => (
+                      <div key={`${periodo.tipo}-${index}`} className="mp-modal-periodo">
+                        <strong>{periodo.label}:</strong> {periodo.inicio} → {periodo.fim}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="modal-section">
                 <h4>Pesagem</h4>
